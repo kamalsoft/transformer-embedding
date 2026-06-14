@@ -12,3 +12,10 @@ docs/en
 DS_Store
 .DS_Store
 .DS_Store?
+docs/.DS_Store
+.DS_Store?
+docs/src
+vector-store/.DS_Store
+vector-store/.DS_Store?
+vector-store/DS_Store
+vector-store/_DS_Store
