@@ -10,6 +10,26 @@
 - **Dynamic Configuration:** Manage all runtime settings (models, paths, chunking) directly via the CLI.
 - **Persistent Storage:** Saves data indices locally in a structured vector store.
 
+## 📄 Supported File Formats
+
+The CLI is capable of processing a variety of document types for local ingestion:
+
+- **Text & Documentation:** `.md`, `.txt`
+- **Portable Documents:** `.pdf`
+- **Microsoft Office:** `.docx`, `.xlsx`
+- **Images (via OCR):** Supports common image formats through the integrated Tesseract.js engine.
+
+## 👁️ How OCR Integration Works
+
+The project uses `Tesseract.js` for local text extraction from images. The process is fully offline:
+
+1.  **Detection:** The `File Walker` identifies image files by extension.
+2.  **Worker Lifecycle:** A local OCR worker is instantiated for each image.
+3.  **Recognition:** The engine analyzes the image and returns structured text strings.
+4.  **Memory Management:** Workers are terminated immediately after extraction to ensure low memory overhead.
+5.  **Standardization:** Extracted text is sent to the `Chunker`, making image content searchable via the same vector/BM25 pipeline as text documents.
+
+
 ## 🏗️ Architecture
 
 ```mermaid
