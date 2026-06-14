@@ -1,0 +1,56 @@
+{
+  "app_name": "ask-doc",
+  "version": "1.0.0",
+  "models": [
+    {
+      "type": "embedding",
+      "id": "xenova-minilm",
+      "name": "Xenova/all-MiniLM-L6-v2",
+      "local_path": "./model/embeddings/all-MiniLM-L6-v2",
+      "active": true
+    }
+  ],
+  "storage": [
+    {
+      "classification": "models_root",
+      "path": "./model"
+    },
+    {
+      "classification": "vector_store_root",
+      "path": "./vector-store"
+    }
+  ],
+  "ingestion": [
+    {
+      "classification": "text_processing",
+      "chunk_size": 1000,
+      "chunk_overlap": 100,
+      "source_path": "./docs/src",
+      "supported_extensions": [
+        ".md",
+        ".txt",
+        ".pdf",
+        ".docx",
+        ".xlsx",
+        ".csv"
+      ]
+    }
+  ],
+  "logging": {
+    "level": "info",
+    "file_path": "./logs/app.log",
+    "enabled": true
+  },
+  "security": {
+    "max_file_size_mb": 150,
+    "max_chunks_per_minute": 300,
+    "allow_directory_traversal": false,
+    "dynamic_throttling_enabled": true,
+    "target_cpu_load": 80,
+    "max_cpu_temp": 75
+  },
+  "caching": {
+    "enabled": true,
+    "embedding_cache_path": "./vector-store/embedding_cache.json"
+  }
+}

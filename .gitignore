@@ -1,0 +1,14 @@
+.ds_store
+dist
+node_modules
+coverage
+*.log
+*.env
+*.local
+*.cache
+*.tmp
+./docs/en
+docs/en
+DS_Store
+.DS_Store
+.DS_Store?
