@@ -219,6 +219,7 @@ export function registerIngestCommand(program: Command) {
         spinner.text = `Found ${files.length} files. Starting processing...`;
 
         const vectorRoot = config.storage.find((s: any) => s.classification === 'vector_store_root')?.path || './vector-store';
+        const vectorStoreType = config.storage.find((s: any) => s.classification === 'vector_store_type')?.value || 'lancedb';
         if (options.force) {
           const targetDir = path.resolve(process.cwd(), vectorRoot);
           spinner.text = 'Force flag detected. Clearing existing vector store...';
@@ -525,8 +526,18 @@ export function registerIngestCommand(program: Command) {
           const fileHash = await getFileHash(filePath);
 
           if (!isForce) {
-            if (await lanceDbService.isFileUnchanged(filePath, fileHash)) {
-              return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
+            if (vectorStoreType === 'lancedb') {
+              if (await lanceDbService.isFileUnchanged(filePath, fileHash)) {
+                return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
+              }
+            } else {
+              const indexPath = path.join(vectorRoot, docId, 'index.json');
+              if (await fs.pathExists(indexPath)) {
+                const existingData = await fs.readJson(indexPath);
+                if (existingData.metadata?.hash === fileHash) {
+                  return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
+                }
+              }
             }
           }
 
@@ -539,14 +550,28 @@ export function registerIngestCommand(program: Command) {
 
           const { bundle: generatedChunks, fileTokens } = await processFile(filePath, content, fileHash, currentSpinner, isDryRun);
           if (!isDryRun) {
-            const chunksToStore = generatedChunks.map((chunk, i) => ({
-              vector: chunk.vector,
-              text: chunk.text,
-              file_path: filePath,
-              chunk_index: i,
-              metadata: JSON.stringify({ ...chunk.metadata, hash: fileHash, processedAt: new Date().toISOString() })
-            }));
-            await lanceDbService.saveChunks(chunksToStore);
+            if (vectorStoreType === 'lancedb') {
+              const chunksToStore = generatedChunks.map((chunk, i) => ({
+                vector: chunk.vector,
+                text: chunk.text,
+                file_path: filePath,
+                chunk_index: i,
+                metadata: JSON.stringify({ ...chunk.metadata, hash: fileHash, processedAt: new Date().toISOString() })
+              }));
+              await lanceDbService.saveChunks(chunksToStore);
+            } else {
+              const outDir = path.join(vectorRoot, docId);
+              await fs.ensureDir(outDir);
+              await fs.writeJson(path.join(outDir, 'index.json'), {
+                documentId: docId,
+                metadata: {
+                  source: filePath,
+                  hash: fileHash,
+                  processedAt: new Date().toISOString()
+                },
+                chunks: generatedChunks
+              });
+            }
           }
           return { skipped: false, numChunks: generatedChunks.length, hash: fileHash, size: fileSize, tokens: fileTokens };
         };
@@ -685,7 +710,11 @@ export function registerIngestCommand(program: Command) {
               const fileName = path.basename(filePath);
               const docId = path.relative(ingestPath, filePath).replace(/[\\/]/g, '_');
               const watchSpinner = ora(`File deleted: ${fileName}. Cleaning up vectors...`).start();
-                    await lanceDbService.deleteByFilePath(filePath);
+                    if (vectorStoreType === 'lancedb') {
+                      await lanceDbService.deleteByFilePath(filePath);
+                    } else {
+                      await fs.remove(path.join(vectorRoot, docId));
+                    }
               watchSpinner.succeed(chalk.yellow(`Removed vectors for: ${fileName}`));
             });
           

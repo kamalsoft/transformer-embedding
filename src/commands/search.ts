@@ -21,25 +21,46 @@ export function registerSearchCommand(program: Command) {
         const config = await readConfig();
         const activeModel = config.models.find((m: any) => m.active);
         const vectorRoot = config.storage.find((s: any) => s.classification === 'vector_store_root')?.path || './vector-store';
+        const vectorStoreType = config.storage.find((s: any) => s.classification === 'vector_store_type')?.value || 'lancedb';
 
         const embeddingService = new EmbeddingService(activeModel);
         const queryVector = await embeddingService.generate(query);
 
-        const lanceDbService = new LanceDbService(vectorRoot);
-        
-        // Perform the vector search
-        const dbResults = await lanceDbService.search(queryVector, parseInt(options.top));
+        let topResults = [];
+        if (vectorStoreType === 'lancedb') {
+            const lanceDbService = new LanceDbService(vectorRoot);
+            
+            // Perform the vector search
+            const dbResults = await lanceDbService.search(queryVector, parseInt(options.top));
 
-        // LanceDB returns _distance (L2). Convert to a 0-100% similarity score for display
-        const topResults = dbResults.map(res => {
-          // L2 distance to percentage (simplified)
-          const score = 1 / (1 + res._distance);
-          return {
-            score,
-            text: res.text,
-            source: res.file_path
-          };
-        });
+            // LanceDB returns _distance (L2). Convert to a 0-100% similarity score for display
+            topResults = dbResults.map(res => {
+              // L2 distance to percentage (simplified)
+              const score = 1 / (1 + res._distance);
+              return {
+                score,
+                text: res.text,
+                source: res.file_path
+              };
+            });
+        } else {
+            // Fallback to IO file search
+            const vectorDir = path.resolve(process.cwd(), vectorRoot);
+            const files = await walkDirectory(vectorDir, 'index.json');
+            const results = [];
+            for (const file of files) {
+                const data = await fs.readJson(file);
+                for (const chunk of data.chunks) {
+                    results.push({
+                        score: dotProduct(queryVector, chunk.vector),
+                        text: chunk.text,
+                        source: data.metadata.source
+                    });
+                }
+            }
+            results.sort((a, b) => b.score - a.score);
+            topResults = results.slice(0, parseInt(options.top));
+        }
 
         spinner.stop();
         console.log(chalk.cyan(`\nTop ${topResults.length} matches for: "${query}"\n`));

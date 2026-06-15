@@ -18,6 +18,10 @@
     {
       "classification": "vector_store_root",
       "path": "./vector-store"
+    },
+    {
+      "classification": "vector_store_type",
+      "value": "file" // Options: "lancedb", "file"
     }
   ],
   "ingestion": [
