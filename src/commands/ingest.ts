@@ -67,6 +67,74 @@ async function getFileHash(filePath: string): Promise<string> {
   });
 }
 
+/**
+ * Helper to extract text from different file formats.
+ */
+const extractText = async (filePath: string, buffer: Buffer, spinner: any): Promise<string> => {
+  const ext = path.extname(filePath).toLowerCase();
+  const fileName = path.basename(filePath);
+
+  // Handle library interop for ESM/CJS
+  const pdfParser = (pdf as any).default || pdf;
+  const mammothParser = (mammoth as any).default || mammoth;
+
+  switch (ext) {
+    case '.md':
+    case '.txt':
+      return buffer.toString('utf-8');
+    case '.pdf':
+      try {
+        const data = await pdfParser(buffer);
+        return data.text || "";
+      } catch (error: any) {
+        spinner.warn(chalk.yellow(`Failed to extract text from PDF ${path.basename(filePath)}: ${error.message}`)).start();
+        return "";
+      }
+    case '.docx':
+      try {
+        const result = await mammothParser.extractRawText({ buffer });
+        return result.value || "";
+      } catch (error: any) {
+        spinner.warn(chalk.yellow(`Failed to extract text from DOCX ${path.basename(filePath)}: ${error.message}`)).start();
+        return "";
+      }
+    case '.png':
+    case '.jpg':
+    case '.jpeg':
+      try {
+        const { data: { text } } = await Tesseract.recognize(buffer, 'eng', {
+          logger: m => {
+            if (m.status === 'recognizing text') {
+              spinner.text = `OCR in progress for ${chalk.cyan(fileName)}: ${Math.round(m.progress * 100)}%`;
+            }
+          }
+        });
+        return text || "";
+      } catch (error: any) {
+        spinner.warn(chalk.yellow(`OCR failed for ${fileName}: ${error.message}`)).start();
+        return "";
+      }
+    case '.csv':
+      // Assuming parseCsv is imported or defined elsewhere
+      // For now, a simple buffer.toString() for CSV, a dedicated parser would be better
+      return buffer.toString('utf-8');
+    case '.xlsx':
+      // XLSX parsing is complex and usually requires a library like 'xlsx'
+      // For now, return empty string or a placeholder
+      spinner.warn(chalk.yellow(`XLSX parsing not fully implemented for ${fileName}. Returning empty content.`)).start();
+      return "";
+    case '.mermaid':
+    case '.puml':
+      // Mermaid and PlantUML are text based; we wrap them in context for the embedder
+      return `This is a diagram description in ${ext.substring(1)} format:\n${buffer.toString('utf-8')}`;
+    default:
+      // Fallback for unknown extensions, treat as plain text
+      // Or, if strict, throw an error
+      spinner.warn(chalk.yellow(`Unknown file type for ${fileName}. Attempting to read as plain text.`)).start();
+      return buffer.toString('utf-8');
+  }
+};
+
 export function registerIngestCommand(program: Command) {
   program
     .command('ingest')
@@ -161,6 +229,7 @@ export function registerIngestCommand(program: Command) {
         startTime: performance.now(),
         filesProcessed: 0,
         totalChunks: 0,
+        totalEstimatedChunks: 0,
         totalBytes: 0,
         totalTokens: 0
       };
@@ -171,6 +240,7 @@ export function registerIngestCommand(program: Command) {
       const taskQueue: { id: number; text: string, task?: 'embed' | 'tokenize' }[] = [];
       const workerTasks = new Map<Worker, number>();
       let taskIdCounter = 0;
+      let etaLoggerInterval: NodeJS.Timeout | null = null;
       let isShuttingDown = false;
 
       const processQueue = () => {
@@ -215,6 +285,26 @@ export function registerIngestCommand(program: Command) {
         if (files.length === 0) {
           throw new Error(`No files matching extensions [${extensions.join(', ')}] found in ${ingestPath}`);
         }
+
+        // Step 1: Estimate total chunks for accurate ETA
+        spinner.text = `Estimating total chunks across ${files.length} files...`;
+        for (const filePath of files) {
+          const fileStats = await fs.stat(filePath);
+          if (fileStats.size > MAX_FILE_SIZE) {
+            // Skip large files from chunk estimation as they will be skipped during ingestion
+            continue;
+          }
+          const buffer = await fs.readFile(filePath); // Read file once
+          const content = await extractText(filePath, buffer, spinner); // Pass spinner for OCR progress
+          if (content && content.trim().length > 0) {
+            const estimatedChunks = chunkText(
+              content, ingestionCfg.chunk_size, ingestionCfg.chunk_overlap, ingestionCfg.min_chunk_size || 50
+            );
+            stats.totalEstimatedChunks += estimatedChunks.length; // Correctly update the outer stats object
+          }
+        }
+        spinner.succeed(chalk.green(`Estimated ${stats.totalEstimatedChunks} total chunks.`)).start();
+
 
         spinner.text = `Found ${files.length} files. Starting processing...`;
 
@@ -406,8 +496,8 @@ export function registerIngestCommand(program: Command) {
             const telemetryLabel = ` | Load: ${chalk.yellow(systemTelemetry.load + '%')} Temp: ${chalk.red(systemTelemetry.temp + '°C')}`;
 
             // Only update detailed progress if we aren't processing many files at once to avoid flickering
-            if (concurrency === 1) {
-              spinner.text = `Embedding ${chalk.cyan(fileName)}: ${bar} ${progress}% (${i + 1}/${chunks.length})${telemetryLabel}`;
+            if (concurrency === 1 || isDryRun) { // Also show detailed progress in dry run
+              spinner.text = `Embedding ${chalk.cyan(fileName)}: ${bar} ${progress}% (Chunk ${i + 1}/${chunks.length}) | Global Chunks: ${stats.totalChunks + 1}${telemetryLabel}`;
             }
 
             const chunk = chunks[i];
@@ -431,7 +521,7 @@ export function registerIngestCommand(program: Command) {
               }
             );
 
-            vector = result.vector;
+            vector = result.vector; // Vector will be empty in dry run
             fileTokens += result.tokens;
               if (embeddingCache && !isDryRun) embeddingCache.set(chunk, vector);
             }
@@ -439,6 +529,7 @@ export function registerIngestCommand(program: Command) {
             if (!isDryRun) {
               bm25Service.addDocument(chunk, filePath);
             }
+            stats.totalChunks++;
 
             bundle.push({ // Each chunk will have its own metadata
               id: `chunk-${i}`,
@@ -455,68 +546,12 @@ export function registerIngestCommand(program: Command) {
           return { bundle, fileTokens };
         };
 
-        /**
-         * Helper to extract text from different file formats.
-         */
-        const extractText = async (filePath: string, buffer: Buffer): Promise<string> => {
-          const ext = path.extname(filePath).toLowerCase();
-          const fileName = path.basename(filePath);
-
-          // Handle library interop for ESM/CJS
-          const pdfParser = (pdf as any).default || pdf;
-          const mammothParser = (mammoth as any).default || mammoth;
-
-          switch (ext) {
-            case '.md':
-            case '.txt':
-              return buffer.toString('utf-8');
-            case '.pdf':
-              try {
-                const data = await pdfParser(buffer);
-                return data.text || "";
-              } catch (error: any) {
-                spinner.warn(chalk.yellow(`Failed to extract text from PDF ${path.basename(filePath)}: ${error.message}`)).start();
-                return "";
-              }
-            case '.docx':
-              try {
-                const result = await mammothParser.extractRawText({ buffer });
-                return result.value || "";
-              } catch (error: any) {
-                spinner.warn(chalk.yellow(`Failed to extract text from DOCX ${path.basename(filePath)}: ${error.message}`)).start();
-                return "";
-              }
-            case '.png':
-            case '.jpg':
-            case '.jpeg':
-              try {
-                const { data: { text } } = await Tesseract.recognize(buffer, 'eng', {
-                  logger: m => {
-                    if (m.status === 'recognizing text' && concurrency === 1) {
-                      spinner.text = `OCR in progress for ${chalk.cyan(fileName)}: ${Math.round(m.progress * 100)}%`;
-                    }
-                  }
-                });
-                return text || "";
-              } catch (error: any) {
-                spinner.warn(chalk.yellow(`OCR failed for ${fileName}: ${error.message}`)).start();
-                return "";
-              }
-            case '.mermaid':
-            case '.puml':
-              // Mermaid and PlantUML are text based; we wrap them in context for the embedder
-              return `This is a diagram description in ${ext.substring(1)} format:\n${buffer.toString('utf-8')}`;
-            default:
-              return buffer.toString('utf-8');
-          }
-        };
-
         const ingestSingleFile = async (filePath: string, isForce: boolean, currentSpinner: any, isDryRun: boolean) => {
           // Create a unique ID based on relative path to prevent filename collisions
           const docId = path.relative(ingestPath, filePath).replace(/[\\/]/g, '_');
           
-          const stats = await fs.stat(filePath);
-          const fileSize = stats.size;
+          const fileStats = await fs.stat(filePath);
+          const fileSize = fileStats.size;
 
           if (fileSize > MAX_FILE_SIZE) {
             spinner.warn(chalk.yellow(`Skipping ${path.basename(filePath)}: File size (${(fileSize / 1024 / 1024).toFixed(1)}MB) exceeds limit.`)).start();
@@ -542,7 +577,7 @@ export function registerIngestCommand(program: Command) {
           }
 
           const buffer = await fs.readFile(filePath);
-          const content = await extractText(filePath, buffer);
+          const content = await extractText(filePath, buffer, currentSpinner);
           
           if (!content || content.trim().length === 0) {
             return { skipped: false, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
@@ -597,7 +632,25 @@ export function registerIngestCommand(program: Command) {
             const fileName = path.basename(file);
             const mem = getRamUsage();
             const currentProgress = ++completed;
-            spinner.text = `[${currentProgress}/${totalFiles}] Processing ${chalk.cyan(fileName)} (${mem} MB RAM)...`;
+
+            const elapsedTime = performance.now() - stats.startTime;
+            const averageTimePerChunk = stats.totalChunks > 0 ? elapsedTime / stats.totalChunks : 0;
+            const remainingChunks = stats.totalEstimatedChunks - stats.totalChunks;
+            const estimatedTimeRemainingMs = averageTimePerChunk * remainingChunks;
+
+            let etaString = '';
+            if (estimatedTimeRemainingMs > 0 && stats.totalChunks > 0) {
+                const totalSeconds = Math.floor(estimatedTimeRemainingMs / 1000);
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+
+                if (hours > 0) etaString = ` ETA: ${hours}h ${minutes}m ${seconds}s`;
+                else if (minutes > 0) etaString = ` ETA: ${minutes}m ${seconds}s`;
+                else etaString = ` ETA: ${seconds}s`;
+            }
+
+            spinner.text = `[${currentProgress}/${totalFiles}] Processing ${chalk.cyan(fileName)} (Global Chunks: ${stats.totalChunks}) (${mem} MB RAM)${etaString}...`;
             
             const fileStartTime = performance.now();
             const { skipped, numChunks, hash, size, tokens } = await ingestSingleFile(file, options.force, spinner, isDryRun);
@@ -605,7 +658,6 @@ export function registerIngestCommand(program: Command) {
 
             if (!skipped) {
               stats.filesProcessed++;
-              stats.totalChunks += numChunks;
               stats.totalBytes += size;
               stats.totalTokens += tokens;
             }
@@ -624,6 +676,23 @@ export function registerIngestCommand(program: Command) {
         // Launch workers
         await Promise.all(Array.from({ length: concurrency }, worker));
 
+        // Step 5: Implement ETA logging
+        etaLoggerInterval = setInterval(async () => {
+          const elapsedTime = performance.now() - stats.startTime;
+          const averageTimePerChunk = stats.totalChunks > 0 ? elapsedTime / stats.totalChunks : 0;
+          const remainingChunks = stats.totalEstimatedChunks - stats.totalChunks;
+          const estimatedTimeRemainingMs = averageTimePerChunk * remainingChunks;
+          const progress = stats.totalEstimatedChunks > 0 ? (stats.totalChunks / stats.totalEstimatedChunks) * 100 : 0;
+
+          await fs.appendFile(telemetryPath, JSON.stringify({
+            t: Date.now(),
+            eta: estimatedTimeRemainingMs / 1000, // Log in seconds
+            progress: progress,
+            chunksProcessed: stats.totalChunks,
+            chunksTotal: stats.totalEstimatedChunks
+          }) + '\n');
+        }, 60000); // Log every minute
+
         if (embeddingCache) await embeddingCache.save();
 
         if (!options.watch || isDryRun) {
@@ -633,6 +702,7 @@ export function registerIngestCommand(program: Command) {
 
         const endTime = performance.now();
         const durationSeconds = ((endTime - stats.startTime) / 1000).toFixed(2);
+        if (etaLoggerInterval) clearInterval(etaLoggerInterval); // Clear interval on completion
 
         spinner.succeed(chalk.green(`Ingestion complete!`));
         
@@ -723,6 +793,7 @@ export function registerIngestCommand(program: Command) {
             const cleanup = async () => {
               isShuttingDown = true;
               if (spinner.isSpinning) spinner.stop();
+              if (etaLoggerInterval) clearInterval(etaLoggerInterval);
               await watcher.close();
               await Promise.all(workers.map(w => w.terminate()));
               console.log(chalk.yellow('\nWatcher stopped. Exiting gracefully...'));
@@ -737,6 +808,7 @@ export function registerIngestCommand(program: Command) {
 
       } catch (error: any) {
         spinner.fail(chalk.red(`Ingestion failed: ${error.message}`));
+        if (etaLoggerInterval) clearInterval(etaLoggerInterval); // Clear interval on failure
         isShuttingDown = true;
         await Promise.all(workers.map(w => w.terminate()));
       }

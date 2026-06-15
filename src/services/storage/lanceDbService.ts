@@ -97,6 +97,19 @@ export class LanceDbService {
     return await table.countRows();
   }
 
+  /**
+   * Returns the count of unique documents (based on file_path) indexed.
+   */
+  public async getDocumentCount(): Promise<number> {
+    const client = await this.connect();
+    if (!(await client.tableNames()).includes(this.TABLE_NAME)) return 0;
+
+    const table = await client.openTable(this.TABLE_NAME);
+    const results = await table.query().select(['file_path']).toArray();
+    const uniqueFiles = new Set(results.map(r => r.file_path));
+    return uniqueFiles.size;
+  }
+
   public async deleteByFilePath(filePath: string): Promise<void> {
     const client = await this.connect();
     if ((await client.tableNames()).includes(this.TABLE_NAME)) {

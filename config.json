@@ -47,7 +47,7 @@
   },
   "security": {
     "max_file_size_mb": 150,
-    "max_chunks_per_minute": 300,
+    "max_chunks_per_minute": 500,
     "allow_directory_traversal": false,
     "dynamic_throttling_enabled": true,
     "target_cpu_load": 80,
