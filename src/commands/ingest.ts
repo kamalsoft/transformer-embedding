@@ -3,7 +3,7 @@ import path from 'path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { walkDirectory } from '../utils/fileWalker.js';
-import { StorageService } from '../services/storage.js';
+import { LanceDbService } from '../services/storage/lanceDbService.js';
 import { BM25Service } from '../services/bm25.js';
 import fs from 'fs-extra';
 import { readConfig } from '../utils/config.js';
@@ -218,8 +218,8 @@ export function registerIngestCommand(program: Command) {
 
         spinner.text = `Found ${files.length} files. Starting processing...`;
 
+        const vectorRoot = config.storage.find((s: any) => s.classification === 'vector_store_root')?.path || './vector-store';
         if (options.force) {
-          const vectorRoot = config.storage.find((s: any) => s.classification === 'vector_store_root')?.path || './vector-store';
           const targetDir = path.resolve(process.cwd(), vectorRoot);
           spinner.text = 'Force flag detected. Clearing existing vector store...';
           await fs.emptyDir(targetDir);
@@ -346,7 +346,7 @@ export function registerIngestCommand(program: Command) {
           });
         };
 
-        const storageService = new StorageService(config.storage);
+        const lanceDbService: LanceDbService = new LanceDbService(vectorRoot);
         const bm25Service = new BM25Service();
 
         const processFile = async (filePath: string, content: string, fileHash: string, spinner: any, isDryRun: boolean) => {
@@ -525,8 +525,7 @@ export function registerIngestCommand(program: Command) {
           const fileHash = await getFileHash(filePath);
 
           if (!isForce) {
-            const existingBundle = await storageService.getDocumentBundle(docId);
-            if (existingBundle && existingBundle.metadata && existingBundle.metadata.hash === fileHash) {
+            if (await lanceDbService.isFileUnchanged(filePath, fileHash)) {
               return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
             }
           }
@@ -540,12 +539,14 @@ export function registerIngestCommand(program: Command) {
 
           const { bundle: generatedChunks, fileTokens } = await processFile(filePath, content, fileHash, currentSpinner, isDryRun);
           if (!isDryRun) {
-            await storageService.saveDocumentBundle(docId, generatedChunks, {
-              source: filePath,
-              processedAt: new Date().toISOString(),
-              hash: fileHash,
-              updatedAt: new Date().toISOString()
-            });
+            const chunksToStore = generatedChunks.map((chunk, i) => ({
+              vector: chunk.vector,
+              text: chunk.text,
+              file_path: filePath,
+              chunk_index: i,
+              metadata: JSON.stringify({ ...chunk.metadata, hash: fileHash, processedAt: new Date().toISOString() })
+            }));
+            await lanceDbService.saveChunks(chunksToStore);
           }
           return { skipped: false, numChunks: generatedChunks.length, hash: fileHash, size: fileSize, tokens: fileTokens };
         };
@@ -684,7 +685,7 @@ export function registerIngestCommand(program: Command) {
               const fileName = path.basename(filePath);
               const docId = path.relative(ingestPath, filePath).replace(/[\\/]/g, '_');
               const watchSpinner = ora(`File deleted: ${fileName}. Cleaning up vectors...`).start();
-              await storageService.deleteIndex(docId);
+                    await lanceDbService.deleteByFilePath(filePath);
               watchSpinner.succeed(chalk.yellow(`Removed vectors for: ${fileName}`));
             });
           

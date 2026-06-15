@@ -15,6 +15,7 @@ DS_Store
 docs/.DS_Store
 .DS_Store?
 docs/src
+vector-store
 vector-store/.DS_Store
 vector-store/.DS_Store?
 vector-store/DS_Store

@@ -8,7 +8,7 @@
 - **Hybrid Search Ready:** Processes documents for both BM25 (sparse) and Vector (dense) search.
 - **Multi-format & OCR Support:** Ingests `.md`, `.txt`, `.pdf`, `.docx`, `.xlsx`, and images using local OCR.
 - **Dynamic Configuration:** Manage all runtime settings (models, paths, chunking) directly via the CLI.
-- **Persistent Storage:** Saves data indices locally in a structured vector store.
+- **Persistent Storage:** Utilizes **LanceDB** for high-performance, local vector storage.
 
 ## 📄 Supported File Formats
 
@@ -50,7 +50,7 @@ graph TD
         Chunker --> BM25[BM25 Service]
         Embedder --> Storage[Storage Service]
         BM25 --> Storage
-        Storage --> VStore[(Vector Store - JSON)]
+        Storage --> VStore[(LanceDB - Local)]
     end
 
     subgraph "Configuration Management"
@@ -170,7 +170,6 @@ npm run download-models
 - [ ] **Semantic Chunking:** Move beyond fixed-size chunks to intelligent splitting based on document structure and context.
 
 ### Phase 3: Scaling & Ecosystem (Long-term)
-- [ ] **Local Vector Database:** Transition from JSON-based storage to a high-performance DB like `LanceDB`.
 - [ ] **Desktop GUI:** A cross-platform desktop interface for users who prefer a visual workspace.
 - [ ] **API Mode:** Headless mode to serve the `ask-doc` engine as a local REST API.
 
@@ -180,7 +179,7 @@ npm run download-models
 - **Chunking:** Documents are split into overlapping segments based on `chunk_size` and `chunk_overlap` defined in `config.json`.
 - **Embedding:** The `EmbeddingService` loads a local model from the `./model/` directory (using ONNX runtime) to transform text chunks into vectors.
 - **Storage:** 
-    - **Vectors:** Saved as individual JSON objects within the `./vector-store/` directory.
+    - **Vectors:** Persisted in **LanceDB**, enabling sub-millisecond retrieval of context chunks.
     - **BM25:** A sparse index is built to support keyword-based retrieval alongside semantic search.
 
 ## 📝 License

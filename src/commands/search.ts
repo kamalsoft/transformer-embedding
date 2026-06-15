@@ -6,6 +6,7 @@ import ora from 'ora';
 import { EmbeddingService } from '../services/embedding.js';
 import { readConfig } from '../utils/config.js';
 import { EmbeddingCache } from '../utils/cache.js';
+import { LanceDbService } from '../services/storage/lanceDbService.js';
 import { walkDirectory } from '../utils/fileWalker.js';
 
 export function registerSearchCommand(program: Command) {
@@ -24,45 +25,21 @@ export function registerSearchCommand(program: Command) {
         const embeddingService = new EmbeddingService(activeModel);
         const queryVector = await embeddingService.generate(query);
 
-        const cache = new EmbeddingCache();
-        const lut = cache.computeADCLookupTable(queryVector);
+        const lanceDbService = new LanceDbService(vectorRoot);
+        
+        // Perform the vector search
+        const dbResults = await lanceDbService.search(queryVector, parseInt(options.top));
 
-        const vectorDir = path.resolve(process.cwd(), vectorRoot);
-        if (!(await fs.pathExists(vectorDir))) {
-          throw new Error('Vector store not found. Please run "ingest" first.');
-        }
-
-        const files = await walkDirectory(vectorDir, 'index.json');
-        const results = [];
-
-        for (const file of files) {
-          const data = await fs.readJson(file);
-          
-          for (const chunk of data.chunks) {
-            let score = 0;
-            const chunkHash = chunk.metadata?.chunkHash;
-
-            // Use ADC for fast ranking if the chunk is in the PQ cache
-            const adcDist = chunkHash ? cache.getDistanceADC(chunkHash, lut) : null;
-            
-            if (adcDist !== null) {
-              // Convert Squared Euclidean Distance to a similarity-like score for display
-              score = 1 / (1 + adcDist);
-            } else {
-              score = dotProduct(queryVector, chunk.vector);
-            }
-
-            results.push({
-              score,
-              text: chunk.text,
-              source: chunk.metadata.source
-            });
-          }
-        }
-
-        // Sort by similarity score descending
-        results.sort((a, b) => b.score - a.score);
-        const topResults = results.slice(0, parseInt(options.top));
+        // LanceDB returns _distance (L2). Convert to a 0-100% similarity score for display
+        const topResults = dbResults.map(res => {
+          // L2 distance to percentage (simplified)
+          const score = 1 / (1 + res._distance);
+          return {
+            score,
+            text: res.text,
+            source: res.file_path
+          };
+        });
 
         spinner.stop();
         console.log(chalk.cyan(`\nTop ${topResults.length} matches for: "${query}"\n`));
