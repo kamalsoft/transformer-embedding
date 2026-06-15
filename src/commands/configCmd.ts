@@ -58,6 +58,38 @@ export function registerConfigCommand(program: Command) {
     });
 
   configGroup
+    .command('list <classification>')
+    .description('List all available keys in a configuration classification')
+    .action(async (classification) => {
+      try {
+        const config = await readConfig();
+        if (!(classification in config)) {
+          console.error(chalk.red(`Error: Classification '${classification}' not found in config.`));
+          return;
+        }
+
+        const target = config[classification];
+        let keys: string[] = [];
+
+        if (Array.isArray(target)) {
+          if (target.length > 0) {
+            keys = Object.keys(target[0]);
+          } else {
+            console.log(chalk.yellow(`The classification '${classification}' is an empty array.`));
+            return;
+          }
+        } else if (typeof target === 'object' && target !== null) {
+          keys = Object.keys(target);
+        }
+
+        console.log(chalk.cyan(`\nAvailable keys in [${classification}]:`));
+        keys.forEach(key => console.log(chalk.white(`- ${key}`)));
+      } catch (error: any) {
+        console.error(chalk.red(`Failed to list keys: ${error.message}`));
+      }
+    });
+
+  configGroup
     .command('get <classification>')
     .description('Pretty-print a configuration classification')
     .action(async (classification) => {

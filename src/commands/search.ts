@@ -14,6 +14,7 @@ export function registerSearchCommand(program: Command) {
     .command('search <query>')
     .description('Search ingested documents using semantic vector similarity')
     .option('--top <number>', 'Number of results to return', '5')
+    .option('--tag <string>', 'Filter results by a specific metadata tag')
     .action(async (query, options) => {
       const spinner = ora('Searching vectors...').start();
       
@@ -26,21 +27,29 @@ export function registerSearchCommand(program: Command) {
         const embeddingService = new EmbeddingService(activeModel);
         const queryVector = await embeddingService.generate(query);
 
+        let filter: string | undefined;
+        if (options.tag) {
+            // Use the SQL LIKE operator to find the tag inside the metadata JSON string
+            filter = `metadata LIKE '%"${options.tag}"%'`;
+        }
+
         let topResults = [];
         if (vectorStoreType === 'lancedb') {
             const lanceDbService = new LanceDbService(vectorRoot);
             
             // Perform the vector search
-            const dbResults = await lanceDbService.search(queryVector, parseInt(options.top));
+            const dbResults = await lanceDbService.search(queryVector, parseInt(options.top), filter);
 
             // LanceDB returns _distance (L2). Convert to a 0-100% similarity score for display
             topResults = dbResults.map(res => {
               // L2 distance to percentage (simplified)
               const score = 1 / (1 + res._distance);
+              const meta = JSON.parse(res.metadata || '{}');
               return {
                 score,
                 text: res.text,
-                source: res.file_path
+                source: res.file_path,
+                tags: meta.tags || []
               };
             });
         } else {
@@ -54,7 +63,8 @@ export function registerSearchCommand(program: Command) {
                     results.push({
                         score: dotProduct(queryVector, chunk.vector),
                         text: chunk.text,
-                        source: data.metadata.source
+                        source: data.metadata.source,
+                        tags: chunk.metadata?.tags || []
                     });
                 }
             }
@@ -68,6 +78,9 @@ export function registerSearchCommand(program: Command) {
         topResults.forEach((res, i) => {
           console.log(chalk.green(`[${i + 1}] Similarity: ${(res.score * 100).toFixed(2)}%`));
           console.log(chalk.gray(`Source: ${res.source}`));
+          if (res.tags && res.tags.length > 0) {
+            console.log(chalk.yellow(`Tags: ${res.tags.join(', ')}`));
+          }
           console.log(chalk.white(`${res.text}\n`));
         });
 

@@ -7,6 +7,7 @@ import { registerSearchCommand } from './commands/search.js';
 import { registerClearCommand } from './commands/clear.js';
 import { registerHealthCommand } from './commands/health.js';
 import { registerDashboardCommand } from './commands/dashboard.js';
+import { registerSyncCommand } from './commands/sync.js';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
 import chalk from 'chalk';
@@ -24,6 +25,7 @@ registerSearchCommand(program);
 registerClearCommand(program);
 registerHealthCommand(program);
 registerDashboardCommand(program);
+registerSyncCommand(program);
 
 program.parseAsync(process.argv).catch((err) => {
   if (err instanceof AppError) {

@@ -37,7 +37,21 @@
         ".docx",
         ".xlsx",
         ".csv"
-      ]
+      ],
+      "tagging_categories": [
+        { "tag": "technical", "keywords": ["code", "api", "function", "class", "implementation", "service", "database"] },
+        { "tag": "documentation", "keywords": ["guide", "readme", "tutorial", "instruction", "overview", "getting started"] },
+        { "tag": "legal", "keywords": ["license", "copyright", "privacy", "agreement", "terms", "compliance"] },
+        { "tag": "project-management", "keywords": ["roadmap", "sprint", "milestone", "deadline", "task", "kanban"] },
+        { "tag": "finance", "keywords": ["invoice", "billing", "payment", "budget", "expense", "tax", "ledger", "financial"] },
+        { "tag": "marketing", "keywords": ["campaign", "strategy", "advertisement", "analytics", "engagement", "branding", "leads"] },
+        { "tag": "research", "keywords": ["abstract", "study", "experiment", "methodology", "results", "data", "hypothesis", "conclusion"] },
+        { "tag": "medical", "keywords": ["patient", "diagnosis", "treatment", "symptoms", "prescription", "clinical", "health"] },
+        { "tag": "human-resources", "keywords": ["resume", "hiring", "recruitment", "benefits", "payroll", "employee", "onboarding"] }
+      ],
+      "tagging_relevance_threshold": 0.5, 
+      "tagging_top_k": 3,
+      "tag_timeout_ms": 30000 
     }
   ],
   "logging": {

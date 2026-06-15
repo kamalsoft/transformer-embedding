@@ -110,6 +110,18 @@ export class LanceDbService {
     return uniqueFiles.size;
   }
 
+  /**
+   * Returns all unique file paths currently indexed in the database.
+   */
+  public async getAllIndexedFiles(): Promise<string[]> {
+    const client = await this.connect();
+    if (!(await client.tableNames()).includes(this.TABLE_NAME)) return [];
+
+    const table = await client.openTable(this.TABLE_NAME);
+    const results = await table.query().select(['file_path']).toArray();
+    return [...new Set(results.map(r => r.file_path))];
+  }
+
   public async deleteByFilePath(filePath: string): Promise<void> {
     const client = await this.connect();
     if ((await client.tableNames()).includes(this.TABLE_NAME)) {
@@ -121,7 +133,7 @@ export class LanceDbService {
   /**
    * Performs a vector search against the stored chunks.
    */
-  public async search(queryVector: number[], limit: number = 5) {
+  public async search(queryVector: number[], limit: number = 5, filter?: string) {
     const client = await this.connect();
     const tableNames = await client.tableNames();
 
@@ -130,6 +142,10 @@ export class LanceDbService {
     }
 
     const table = await client.openTable(this.TABLE_NAME);
-    return await table.vectorSearch(queryVector).limit(limit).toArray();
+    let query = table.vectorSearch(queryVector).limit(limit);
+    if (filter) {
+      query = query.where(filter);
+    }
+    return await query.toArray();
   }
 }

@@ -68,6 +68,20 @@ async function getFileHash(filePath: string): Promise<string> {
 }
 
 /**
+ * Calculates similarity between two normalized vectors (Cosine Similarity).
+ * Since MiniLM embeddings are normalized, dot product is equivalent to cosine similarity.
+ */
+const cosineSimilarity = (a: ArrayLike<number>, b: ArrayLike<number>): number => {
+  const len = a.length;
+  if (len !== b.length || len === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < len; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+};
+
+/**
  * Helper to extract text from different file formats.
  */
 const extractText = async (filePath: string, buffer: Buffer, spinner: any): Promise<string> => {
@@ -287,6 +301,7 @@ export function registerIngestCommand(program: Command) {
         }
 
         // Step 1: Estimate total chunks for accurate ETA
+        const fileChunkCounts = new Map<string, number>();
         spinner.text = `Estimating total chunks across ${files.length} files...`;
         for (const filePath of files) {
           const fileStats = await fs.stat(filePath);
@@ -300,11 +315,11 @@ export function registerIngestCommand(program: Command) {
             const estimatedChunks = chunkText(
               content, ingestionCfg.chunk_size, ingestionCfg.chunk_overlap, ingestionCfg.min_chunk_size || 50
             );
+            fileChunkCounts.set(filePath, estimatedChunks.length);
             stats.totalEstimatedChunks += estimatedChunks.length; // Correctly update the outer stats object
           }
         }
         spinner.succeed(chalk.green(`Estimated ${stats.totalEstimatedChunks} total chunks.`)).start();
-
 
         spinner.text = `Found ${files.length} files. Starting processing...`;
 
@@ -440,7 +455,63 @@ export function registerIngestCommand(program: Command) {
         const lanceDbService: LanceDbService = new LanceDbService(vectorRoot);
         const bm25Service = new BM25Service();
 
-        const processFile = async (filePath: string, content: string, fileHash: string, spinner: any, isDryRun: boolean) => {
+        const tagEmbeddings = new Map<string, Float32Array>();
+        const taggingCategories: { tag: string; keywords: string[] }[] = ingestionCfg.tagging_categories || [];
+        const tagTimeout = ingestionCfg.tag_timeout_ms || 30000;
+
+        // Zero-shot tagging setup: Pre-embed labels for semantic comparison
+        if (!isDryRun && taggingCategories.length > 0) {
+          let tagsCompleted = 0;
+          spinner.text = `Embedding metadata tags [0/${taggingCategories.length}]...`;
+          
+          const tagPromises = taggingCategories.map(async (cat) => {
+            try {
+              // Construct a richer semantic description using the tag and its keywords
+              const tagDescription = cat.keywords && cat.keywords.length > 0
+                ? `${cat.tag}: ${cat.keywords.join(' ')}`
+                : cat.tag;
+
+              // Parallelize with a configurable timeout per tag to prevent hanging
+              const result = await Promise.race([
+                offloadedTask(tagDescription),
+                new Promise<{ vector: number[], tokens: number }>((_, reject) => 
+                  setTimeout(() => reject(new Error(`Timeout embedding tag "${cat.tag}" after ${tagTimeout}ms`)), tagTimeout)
+                )
+              ]);
+              tagsCompleted++;
+              spinner.text = `Embedding metadata tags [${tagsCompleted}/${taggingCategories.length}]: ${chalk.cyan(cat.tag)}...`;
+              return { tag: cat.tag, vector: result.vector };
+            } catch (err: any) {
+              tagsCompleted++;
+              spinner.text = `Embedding metadata tags [${tagsCompleted}/${taggingCategories.length}]...`;
+              logger.error(`Classification tag error [${cat.tag}]: ${err.message || err}`);
+              return { tag: cat.tag, error: err.message || String(err) };
+            }
+          });
+
+          const results = await Promise.all(tagPromises);
+          results.forEach(res => {
+            if ('vector' in res && res.vector) {
+              tagEmbeddings.set(res.tag, new Float32Array(res.vector));
+            } else if ('error' in res) {
+              spinner.warn(chalk.yellow(`Skipped tag "${res.tag}": ${res.error}`)).start();
+            }
+          });
+
+          spinner.succeed(`Embedded ${tagEmbeddings.size} tags for zero-shot classification.`).start();
+        }
+
+        // Pre-convert Map to a flat list to avoid expensive iterator/array allocation in the chunk loop
+        const tagList = Array.from(tagEmbeddings.entries()).map(([name, vector]) => ({
+          name,
+          vector
+        }));
+        
+        // Use configured threshold or default to 0.5
+        const relevanceThreshold = ingestionCfg.tagging_relevance_threshold ?? 0.5;
+        const taggingTopK = ingestionCfg.tagging_top_k ?? 3;
+
+        const processFile = async (filePath: string, content: string, fileHash: string, spinner: any, isDryRun: boolean, tagList: {name: string, vector: Float32Array}[]) => {
           const fileName = path.basename(filePath);
           let fileTokens = 0;
           const chunks = chunkText(
@@ -497,7 +568,7 @@ export function registerIngestCommand(program: Command) {
 
             // Only update detailed progress if we aren't processing many files at once to avoid flickering
             if (concurrency === 1 || isDryRun) { // Also show detailed progress in dry run
-              spinner.text = `Embedding ${chalk.cyan(fileName)}: ${bar} ${progress}% (Chunk ${i + 1}/${chunks.length}) | Global Chunks: ${stats.totalChunks + 1}${telemetryLabel}`;
+              spinner.text = `Embedding ${chalk.cyan(fileName)}: ${bar} ${progress}% (Chunk ${i + 1}/${chunks.length}) | Chunks: ${stats.totalChunks + 1}/${stats.totalEstimatedChunks}${telemetryLabel}`;
             }
 
             const chunk = chunks[i];
@@ -539,7 +610,23 @@ export function registerIngestCommand(program: Command) {
                 source: filePath, 
                 chunkIndex: i,
                 fileChecksum: fileHash,
-                chunkHash
+                chunkHash,
+                tags: (() => {
+                  if (isDryRun || tagList.length === 0 || vector.length === 0) return [];
+                  const vChunk = new Float32Array(vector);
+                  const scoredTags: { tag: string; score: number }[] = [];
+                  for (const tagItem of tagList) {
+                    const score = cosineSimilarity(vChunk, tagItem.vector);
+                    if (score > relevanceThreshold) {
+                      scoredTags.push({ tag: tagItem.name, score });
+                    }
+                  }
+                  // Sort by score in descending order and take the top_k
+                  return scoredTags
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, taggingTopK)
+                    .map(item => item.tag);
+                })()
               }
             });
           }
@@ -563,6 +650,7 @@ export function registerIngestCommand(program: Command) {
           if (!isForce) {
             if (vectorStoreType === 'lancedb') {
               if (await lanceDbService.isFileUnchanged(filePath, fileHash)) {
+                stats.totalChunks += fileChunkCounts.get(filePath) || 0;
                 return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
               }
             } else {
@@ -570,6 +658,7 @@ export function registerIngestCommand(program: Command) {
               if (await fs.pathExists(indexPath)) {
                 const existingData = await fs.readJson(indexPath);
                 if (existingData.metadata?.hash === fileHash) {
+                  stats.totalChunks += fileChunkCounts.get(filePath) || 0;
                   return { skipped: true, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
                 }
               }
@@ -583,7 +672,7 @@ export function registerIngestCommand(program: Command) {
             return { skipped: false, numChunks: 0, hash: fileHash, size: fileSize, tokens: 0 };
           }
 
-          const { bundle: generatedChunks, fileTokens } = await processFile(filePath, content, fileHash, currentSpinner, isDryRun);
+          const { bundle: generatedChunks, fileTokens } = await processFile(filePath, content, fileHash, currentSpinner, isDryRun, tagList);
           if (!isDryRun) {
             if (vectorStoreType === 'lancedb') {
               const chunksToStore = generatedChunks.map((chunk, i) => ({
@@ -650,7 +739,7 @@ export function registerIngestCommand(program: Command) {
                 else etaString = ` ETA: ${seconds}s`;
             }
 
-            spinner.text = `[${currentProgress}/${totalFiles}] Processing ${chalk.cyan(fileName)} (Global Chunks: ${stats.totalChunks}) (${mem} MB RAM)${etaString}...`;
+            spinner.text = `[${currentProgress}/${totalFiles}] Processing ${chalk.cyan(fileName)} (Chunks: ${stats.totalChunks}/${stats.totalEstimatedChunks}) (${mem} MB RAM)${etaString}...`;
             
             const fileStartTime = performance.now();
             const { skipped, numChunks, hash, size, tokens } = await ingestSingleFile(file, options.force, spinner, isDryRun);
