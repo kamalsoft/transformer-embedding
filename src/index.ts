@@ -8,6 +8,7 @@ import { registerClearCommand } from './commands/clear.js';
 import { registerHealthCommand } from './commands/health.js';
 import { registerDashboardCommand } from './commands/dashboard.js';
 import { registerSyncCommand } from './commands/sync.js';
+import { registerAgenticExtractCommand } from './commands/agenticExtract.js';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
 import chalk from 'chalk';
@@ -26,6 +27,7 @@ registerClearCommand(program);
 registerHealthCommand(program);
 registerDashboardCommand(program);
 registerSyncCommand(program);
+registerAgenticExtractCommand(program);
 
 program.parseAsync(process.argv).catch((err) => {
   if (err instanceof AppError) {
