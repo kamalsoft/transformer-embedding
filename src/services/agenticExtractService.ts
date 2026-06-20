@@ -24,40 +24,22 @@ export class AgenticExtractService {
       const stats = await fs.stat(filePath);
       if (!stats.isFile()) return;
 
-      // Only process .json files which hold the vector chunks
-      if (path.extname(filePath) !== '.json') return;
+      const fileName = path.basename(filePath);
 
-      // Ensure zero side effects on source: open read-only
-      const rawContent = await fs.readFile(filePath, 'utf-8');
-      
-      let parsedJson: any;
-      try {
-        parsedJson = JSON.parse(rawContent);
-      } catch (e) {
-        return; // Not a valid json file, skip
-      }
+      // Only process the original binary backups created by ingest
+      if (!fileName.startsWith('original.')) return;
 
-      // Reconstruct original text by joining all chunk texts
-      if (!parsedJson.chunks || !Array.isArray(parsedJson.chunks)) {
-        return; // Doesn't match expected schema
-      }
-
-      const reconstructedText = parsedJson.chunks.map((c: any) => c.text).join('\n\n');
-
-      // Preserve relative structure in the target directory
-      // The original filePath is likely .../vector-store/quicktour.md/index.json
-      // We want to reconstruct it as .../vector-source/quicktour.md
-      const dirName = path.basename(path.dirname(filePath)); // 'quicktour.md'
-      const relativeDirPath = path.dirname(path.relative(sourceBasePath, filePath)); // 'quicktour.md'
+      // The parent directory is the actual document ID (e.g. ERP requirement.docx)
+      const relativeDirPath = path.dirname(path.relative(sourceBasePath, filePath));
       
       const targetFilePath = path.join(this.targetPath, relativeDirPath);
 
       await fs.ensureDir(path.dirname(targetFilePath));
       
-      // Write to the new vector-source directory
-      await fs.writeFile(targetFilePath, reconstructedText, 'utf-8');
+      // Zero Data Loss: Direct binary copy
+      await fs.copyFile(filePath, targetFilePath);
       
-      console.log(chalk.green(`  ✓ Reconstructed: `) + chalk.dim(relativeDirPath));
+      console.log(chalk.green(`  ✓ Restored: `) + chalk.dim(relativeDirPath));
     } catch (error) {
       // Graceful Error Handling: Log securely without crashing
       logger.error(error as Error, `[AgenticExtractService] Error processing file ${filePath}:`);

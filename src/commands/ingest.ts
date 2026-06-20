@@ -686,6 +686,11 @@ export function registerIngestCommand(program: Command) {
             } else {
               const outDir = path.join(vectorRoot, docId);
               await fs.ensureDir(outDir);
+              
+              // Zero Data Loss: Save exact copy of the original file
+              const ext = path.extname(filePath);
+              await fs.copyFile(filePath, path.join(outDir, `original${ext}`));
+
               await fs.writeJson(path.join(outDir, 'index.json'), {
                 documentId: docId,
                 metadata: {
@@ -959,8 +964,8 @@ function chunkText(text: string, size: number, overlap: number, minSize: number 
 
     if (trimmed.length < minSize && finalChunks.length > 0) {
       const lastIdx = finalChunks.length - 1;
-      // Merge small leftover with the previous chunk to maintain semantic density
-      finalChunks[lastIdx] = (finalChunks[lastIdx] + " " + trimmed).slice(0, size + overlap);
+      // Merge small leftover with the previous chunk to maintain semantic density without truncating
+      finalChunks[lastIdx] = finalChunks[lastIdx] + " " + trimmed;
     } else {
       finalChunks.push(trimmed);
     }
