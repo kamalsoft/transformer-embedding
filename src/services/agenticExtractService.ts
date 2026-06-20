@@ -17,46 +17,107 @@ export class AgenticExtractService {
   }
 
   /**
-   * Processes a single file from the source to the target directory.
+   * NLP Overlap Deduplication:
+   * The ingest pipeline creates overlapping chunks so the AI model has context
+   * across chunk boundaries. This means the END of chunk[N] is repeated at
+   * the START of chunk[N+1].
+   *
+   * This function finds the longest suffix of `prev` that matches the prefix
+   * of `next`, and strips it before joining — producing clean, non-repeated text.
    */
-  private async processFile(filePath: string, sourceBasePath: string): Promise<void> {
+  private deduplicateOverlap(prev: string, next: string): string {
+    const maxOverlap = Math.min(prev.length, next.length, 500);
+
+    for (let len = maxOverlap; len > 10; len--) {
+      const suffix = prev.slice(-len);
+      if (next.startsWith(suffix)) {
+        return next.slice(len).replace(/^[\s\n]+/, '');
+      }
+    }
+    return next;
+  }
+
+  /**
+   * Reads a vector-store index.json, extracts all chunk texts, deduplicates
+   * overlapping context windows, and writes clean reconstructed text to vector-source.
+   */
+  private async processIndexFile(filePath: string, sourceBasePath: string): Promise<void> {
     try {
       const stats = await fs.stat(filePath);
       if (!stats.isFile()) return;
 
-      const fileName = path.basename(filePath);
+      if (path.basename(filePath) !== 'index.json') return;
 
-      // Only process the original binary backups created by ingest
-      if (!fileName.startsWith('original.')) return;
+      const rawContent = await fs.readFile(filePath, 'utf-8');
 
-      // The parent directory is the actual document ID (e.g. ERP requirement.docx)
-      const relativeDirPath = path.dirname(path.relative(sourceBasePath, filePath));
-      
-      const targetFilePath = path.join(this.targetPath, relativeDirPath);
+      let parsedJson: any;
+      try {
+        parsedJson = JSON.parse(rawContent);
+      } catch {
+        return;
+      }
+
+      if (!parsedJson.chunks || !Array.isArray(parsedJson.chunks) || parsedJson.chunks.length === 0) {
+        return;
+      }
+
+      const chunks: string[] = parsedJson.chunks
+        .map((c: any) => (typeof c.text === 'string' ? c.text : ''))
+        .filter((t: string) => t.trim().length > 0);
+
+      if (chunks.length === 0) return;
+
+      // Deduplicate overlap between consecutive chunks
+      const deduplicated: string[] = [chunks[0]];
+      for (let i = 1; i < chunks.length; i++) {
+        const cleanNext = this.deduplicateOverlap(chunks[i - 1], chunks[i]);
+        if (cleanNext.trim().length > 0) {
+          deduplicated.push(cleanNext);
+        }
+      }
+
+      const reconstructedText = deduplicated.join('\n');
+
+      // Original document name is the parent folder name in vector-store (e.g. "ERP requirement.docx")
+      const originalName = path.dirname(path.relative(sourceBasePath, filePath));
+      const originalExt = path.extname(originalName).replace('.', '') || 'txt';
+
+      // Build YAML frontmatter to preserve file metadata
+      const frontmatter =
+        `---\n` +
+        `source: "${originalName}"\n` +
+        `format: ${originalExt}\n` +
+        `chunks: ${deduplicated.length}\n` +
+        `extracted_at: ${new Date().toISOString()}\n` +
+        `---\n\n`;
+
+      const finalContent = frontmatter + reconstructedText;
+
+      // Replace the original extension with .md for a clean Markdown filename
+      // "ERP requirement.docx" → "ERP requirement.md"
+      // "quicktour.md"         → "quicktour.md"
+      const nameWithoutExt = originalName.replace(/\.[^/.]+$/, '');
+      const targetFilePath = path.join(this.targetPath, nameWithoutExt) + '.md';
 
       await fs.ensureDir(path.dirname(targetFilePath));
-      
-      // Zero Data Loss: Direct binary copy
-      await fs.copyFile(filePath, targetFilePath);
-      
-      console.log(chalk.green(`  ✓ Restored: `) + chalk.dim(relativeDirPath));
+      await fs.writeFile(targetFilePath, finalContent, 'utf-8');
+
+      const displayName = path.basename(targetFilePath);
+      console.log(chalk.green(`  ✓ Extracted: `) + chalk.cyan(displayName) + chalk.dim(` ← ${originalName} (${deduplicated.length} chunks)`));
     } catch (error) {
-      // Graceful Error Handling: Log securely without crashing
-      logger.error(error as Error, `[AgenticExtractService] Error processing file ${filePath}:`);
+      logger.error(error as Error, `[AgenticExtractService] Error processing ${filePath}:`);
       console.log(chalk.red(`  ✗ Failed: `) + chalk.dim(filePath));
     }
   }
 
-
   /**
-   * Public method to run the non-destructive pipeline.
-   * Traverses the source directory and processes each file safely.
+   * Public method to run the extraction pipeline.
    */
   public async runPipeline(options: PipelineOptions): Promise<void> {
     console.log(chalk.blue.bold(`\n[Agentic Extract] Starting cognitive synthesis pipeline...`));
     console.log(chalk.dim(`Source: ${options.sourcePath}`));
     console.log(chalk.dim(`Target: ${this.targetPath}\n`));
-    
+
     try {
       if (options.force) {
         console.log(chalk.yellow(`[Agentic Extract] Force flag provided. Clearing target directory...`));
@@ -78,7 +139,7 @@ export class AgenticExtractService {
   }
 
   /**
-   * Recursively traverses the directory safely.
+   * Recursively traverses the vector-store directory.
    */
   private async traverseDirectory(currentPath: string, sourceBasePath: string): Promise<void> {
     const entries = await fs.readdir(currentPath);
@@ -90,11 +151,10 @@ export class AgenticExtractService {
       if (stats.isDirectory()) {
         await this.traverseDirectory(fullPath, sourceBasePath);
       } else {
-        await this.processFile(fullPath, sourceBasePath);
+        await this.processIndexFile(fullPath, sourceBasePath);
       }
     });
 
-    // Run concurrently but handle all internal promise rejections gracefully
     await Promise.allSettled(promises);
   }
 }

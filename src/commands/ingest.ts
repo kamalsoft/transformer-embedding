@@ -686,11 +686,6 @@ export function registerIngestCommand(program: Command) {
             } else {
               const outDir = path.join(vectorRoot, docId);
               await fs.ensureDir(outDir);
-              
-              // Zero Data Loss: Save exact copy of the original file
-              const ext = path.extname(filePath);
-              await fs.copyFile(filePath, path.join(outDir, `original${ext}`));
-
               await fs.writeJson(path.join(outDir, 'index.json'), {
                 documentId: docId,
                 metadata: {
